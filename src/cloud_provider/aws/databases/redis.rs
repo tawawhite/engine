@@ -1,9 +1,8 @@
 use tera::Context as TeraContext;
 
 use crate::cloud_provider::aws::databases::utilities;
-use crate::cloud_provider::aws::kubernetes::EKS;
 use crate::cloud_provider::aws::{common, AWS};
-use crate::cloud_provider::environment::Environment;
+use crate::cloud_provider::environment::{Environment, Kind};
 use crate::cloud_provider::kubernetes::Kubernetes;
 use crate::cloud_provider::service::{
     Action, Backup, Create, Database, DatabaseOptions, DatabaseType, Delete, Downgrade, Pause,
@@ -11,15 +10,12 @@ use crate::cloud_provider::service::{
 };
 use crate::cloud_provider::DeploymentTarget;
 use crate::cmd::helm::Timeout;
-use crate::cmd::kubectl::{
-    kubectl_exec_create_namespace, kubectl_exec_delete_namespace, kubectl_exec_delete_secret,
-};
 use crate::constants::{AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY};
 use crate::error::{
-    cast_simple_error_to_engine_error, EngineError, EngineErrorCause, EngineErrorScope,
+    cast_simple_error_to_engine_error, EngineError, EngineErrorCause, EngineErrorScope, StringError,
 };
 use crate::models::Context;
-use std::path::Path;
+use std::collections::HashMap;
 
 pub struct Redis {
     context: Context,
@@ -76,7 +72,11 @@ impl Redis {
         )
     }
 
-    fn tera_context(&self, kubernetes: &dyn Kubernetes, environment: &Environment) -> TeraContext {
+    fn tera_context(
+        &self,
+        kubernetes: &dyn Kubernetes,
+        environment: &Environment,
+    ) -> Result<TeraContext, EngineError> {
         let mut context = self.default_tera_context(kubernetes, environment);
 
         // FIXME: is there an other way than downcast a pointer?
@@ -110,6 +110,28 @@ impl Redis {
             ),
         }
 
+        let is_managed_version = match environment.kind {
+            Kind::Production => true,
+            Kind::Development => false,
+        };
+
+        let database_version = match get_redis_version(&self.version(), is_managed_version) {
+            Ok(v) => v,
+            Err(e) => {
+                return Err(EngineError::new(
+                    EngineErrorCause::Internal,
+                    EngineErrorScope::Engine,
+                    self.id(),
+                    Some(e.message),
+                ))
+            }
+        };
+        context.insert("database_version", database_version.as_str());
+        context.insert(
+            "database_version_major",
+            &database_version.chars().next().unwrap(),
+        );
+
         context.insert("namespace", environment.namespace());
 
         context.insert("aws_access_key", &cp.access_key_id);
@@ -131,7 +153,14 @@ impl Redis {
         context.insert("database_fqdn", &self.options.host.as_str());
         context.insert("database_id", &self.id());
 
-        context
+        if self.context.resource_expiration_in_seconds().is_some() {
+            context.insert(
+                "resource_expiration_in_seconds",
+                &self.context.resource_expiration_in_seconds(),
+            )
+        }
+
+        Ok(context)
     }
 
     fn delete(&self, target: &DeploymentTarget, is_error: bool) -> Result<(), EngineError> {
@@ -144,7 +173,10 @@ impl Redis {
                     return Ok(());
                 }
 
-                let context = self.tera_context(*kubernetes, *environment);
+                let context = self.tera_context(*kubernetes, *environment)?;
+
+                // deploy before destroy to avoid missing elements
+                self.on_create(target)?;
 
                 let _ = cast_simple_error_to_engine_error(
                     self.engine_error_scope(),
@@ -152,44 +184,6 @@ impl Redis {
                     crate::template::generate_and_copy_all_files_into_dir(
                         format!("{}/aws/services/common", self.context.lib_root_dir()).as_str(),
                         &workspace_dir,
-                        &context,
-                    ),
-                )?;
-
-                let _ = cast_simple_error_to_engine_error(
-                    self.engine_error_scope(),
-                    self.context.execution_id(),
-                    crate::template::generate_and_copy_all_files_into_dir(
-                        format!("{}/aws/services/redis", self.context.lib_root_dir()).as_str(),
-                        workspace_dir.as_str(),
-                        &context,
-                    ),
-                )?;
-
-                let _ = cast_simple_error_to_engine_error(
-                    self.engine_error_scope(),
-                    self.context.execution_id(),
-                    crate::template::generate_and_copy_all_files_into_dir(
-                        format!(
-                            "{}/aws/charts/external-name-svc",
-                            self.context.lib_root_dir()
-                        )
-                        .as_str(),
-                        format!("{}/{}", workspace_dir, "external-name-svc").as_str(),
-                        &context,
-                    ),
-                )?;
-
-                let _ = cast_simple_error_to_engine_error(
-                    self.engine_error_scope(),
-                    self.context.execution_id(),
-                    crate::template::generate_and_copy_all_files_into_dir(
-                        format!(
-                            "{}/aws/charts/external-name-svc",
-                            self.context.lib_root_dir()
-                        )
-                        .as_str(),
-                        workspace_dir.as_str(),
                         &context,
                     ),
                 )?;
@@ -304,7 +298,7 @@ impl Create for Redis {
             DeploymentTarget::ManagedServices(kubernetes, environment) => {
                 // use terraform
                 info!("deploy Redis on AWS Elasticcache for {}", self.name());
-                let context = self.tera_context(*kubernetes, *environment);
+                let context = self.tera_context(*kubernetes, *environment)?;
 
                 let workspace_dir = self.workspace_directory();
 
@@ -355,7 +349,7 @@ impl Create for Redis {
                 // use helm
                 info!("deploy Redis on Kubernetes for {}", self.name());
 
-                let context = self.tera_context(*kubernetes, *environment);
+                let context = self.tera_context(*kubernetes, *environment)?;
                 let workspace_dir = self.workspace_directory();
 
                 let aws = kubernetes
@@ -575,5 +569,27 @@ impl Backup for Redis {
 
     fn on_restore_error(&self, _target: &DeploymentTarget) -> Result<(), EngineError> {
         unimplemented!()
+    }
+}
+
+fn get_redis_version(
+    requested_version: &str,
+    is_managed_service: bool,
+) -> Result<String, StringError> {
+    let mut supported_redis_versions = HashMap::with_capacity(2);
+
+    if is_managed_service {
+        // https://docs.aws.amazon.com/AmazonElastiCache/latest/red-ug/supported-engine-versions.html
+        supported_redis_versions.insert("5", "5.0.6");
+        supported_redis_versions.insert("6", "6.x");
+    } else {
+        // https://hub.docker.com/r/bitnami/redis/tags?page=1&ordering=last_updated
+        supported_redis_versions.insert("5", "5.0.10-debian-10-r28");
+        supported_redis_versions.insert("6", "6.0.9-debian-10-r26");
+    }
+
+    match utilities::get_supported_version_to_use(supported_redis_versions, requested_version) {
+        Ok(v) => Ok(v),
+        Err(e) => Err(e),
     }
 }

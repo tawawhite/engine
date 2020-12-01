@@ -57,25 +57,46 @@ resource "helm_release" "qovery_engine_resources" {
     value = "tcp://0.0.0.0:2375"
   }
 
-  # Limits
+  # Engine Limits
   set {
-    name = "resources.limits.cpu"
+    name = "engineResources.limits.cpu"
     value = "1"
   }
 
   set {
-    name = "resources.requests.cpu"
+    name = "engineResources.requests.cpu"
     value = "500m"
   }
 
   set {
-    name = "resources.limits.memory"
-    value = "2Gi"
+    name = "engineResources.limits.memory"
+    value = "512Mi"
   }
 
   set {
-    name = "resources.requests.memory"
-    value = "2Gi"
+    name = "engineResources.requests.memory"
+    value = "512Mi"
+  }
+
+  # Build limits
+  set {
+    name = "buildResources.limits.cpu"
+    value = "1"
+  }
+
+  set {
+    name = "buildResources.requests.cpu"
+    value = "500m"
+  }
+
+  set {
+    name = "buildResources.limits.memory"
+    value = "4Gi"
+  }
+
+  set {
+    name = "buildResources.requests.memory"
+    value = "4Gi"
   }
 
   depends_on = [

@@ -9,8 +9,10 @@ use qovery_engine::models::{
 };
 use qovery_engine::transaction::TransactionResult;
 use test_utilities::aws::context;
-use test_utilities::utilities::{init, is_pod_restarted};
+
+use test_utilities::utilities::{init, is_pod_restarted_aws_env};
 use tracing::{span, Level};
+
 // to check overload between several databases and apps
 #[test]
 #[ignore]
@@ -282,7 +284,7 @@ fn postgresql_deploy_a_working_environment_and_redeploy() {
     };
     // TO CHECK: DATABASE SHOULDN'T BE RESTARTED AFTER A REDEPLOY
     let database_name = format!("{}-0", &environment_check.databases[0].name);
-    match is_pod_restarted(environment_check, database_name.as_str()) {
+    match is_pod_restarted_aws_env(environment_check, database_name.as_str()) {
         (true, _) => assert!(true),
         (false, _) => assert!(false),
     }
@@ -757,7 +759,7 @@ fn test_redis_configuration(context: Context, mut environment: Environment, vers
     let database_username = "superuser".to_string();
     let database_password = generate_id();
     // while waiting the info to be given directly in the database info, we're using this
-    let is_elasticcache = match environment.kind {
+    let is_elasticache = match environment.kind {
         Kind::Production => true,
         Kind::Development => false,
     };
@@ -776,7 +778,7 @@ fn test_redis_configuration(context: Context, mut environment: Environment, vers
         total_cpus: "500m".to_string(),
         total_ram_in_mib: 512,
         disk_size_in_gib: 10,
-        database_instance_type: "db.t2.medium".to_string(),
+        database_instance_type: "cache.t3.micro".to_string(),
         database_disk_type: "gp2".to_string(),
     }];
     environment.applications = environment
@@ -799,7 +801,7 @@ fn test_redis_configuration(context: Context, mut environment: Environment, vers
                 // },
                 EnvironmentVariable {
                     key: "IS_ELASTICCACHE".to_string(),
-                    value: is_elasticcache.to_string(),
+                    value: is_elasticache.to_string(),
                 },
                 EnvironmentVariable {
                     key: "REDIS_HOST".to_string(),
@@ -846,25 +848,33 @@ fn test_redis_configuration(context: Context, mut environment: Environment, vers
 #[test]
 fn redis_v5_deploy_a_working_environment() {
     let context = context();
-    let mut environment = test_utilities::aws::working_minimal_environment(&context);
+    let environment = test_utilities::aws::working_minimal_environment(&context);
     test_redis_configuration(context, environment, "5.0");
 }
 
 #[test]
 fn redis_v6_deploy_a_working_environment() {
     let context = context();
-    let mut environment = test_utilities::aws::working_minimal_environment(&context);
+    let environment = test_utilities::aws::working_minimal_environment(&context);
     test_redis_configuration(context, environment, "6.0");
 }
 
-// test Redis v3.6 with production environment (Elasticcache)
-// #[test]
-// #[ignore]
-// fn redis_v3_6_deploy_a_working_environment_with_production() {
-//     let context = context();
-//
-//     let mut environment = test_utilities::aws::working_minimal_environment(&context);
-//     environment.kind = Kind::Production;
-//
-//     test_redis_configuration(context, environment, "5.0");
-// }
+// test Redis 5.0 with production environment (Elasticache)
+#[test]
+#[ignore]
+fn redis_v5_0_deploy_a_working_environment_with_production() {
+    let context = context();
+    let mut environment = test_utilities::aws::working_minimal_environment(&context);
+    environment.kind = Kind::Production;
+    test_redis_configuration(context, environment, "5.0");
+}
+
+// test Redis 5.0 with production environment (Elasticache)
+#[test]
+#[ignore]
+fn redis_v6_0_deploy_a_working_environment_with_production() {
+    let context = context();
+    let mut environment = test_utilities::aws::working_minimal_environment(&context);
+    environment.kind = Kind::Production;
+    test_redis_configuration(context, environment, "6.0");
+}
