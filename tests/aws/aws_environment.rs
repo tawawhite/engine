@@ -10,7 +10,6 @@ use qovery_engine::transaction::{DeploymentOption, TransactionResult};
 
 use test_utilities::utilities::{init, is_pod_restarted_aws_env};
 use tracing::{span, Level};
-use self::test_utilities::aws::context;
 
 // insert how many actions you will use in tests
 // args are function you want to use and how many context you want to have
